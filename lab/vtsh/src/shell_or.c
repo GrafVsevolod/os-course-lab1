@@ -144,6 +144,8 @@ static int run_single_command(char *cmd) {
         return 1;
     }
 
+    write(STDERR_FILENO, "DEBUG: after waitpid\n", 21);
+
     if (clock_gettime(CLOCK_MONOTONIC, &t_end) == 0) {
         double elapsed = diff_seconds(&t_start, &t_end);
         char out[128];
@@ -179,4 +181,5 @@ int main(void) {
 
     return 0;
 }
+
 
