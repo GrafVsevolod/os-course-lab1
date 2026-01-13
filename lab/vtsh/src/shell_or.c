@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <time.h>
 
 #define MAX_LINE 4096
 #define MAX_ARGS 128
@@ -84,6 +85,12 @@ static int build_argv(char *cmd, char **argv, int max_args) {
     return argc;
 }
 
+static double diff_seconds(const struct timespec *start, const struct timespec *end) {
+    double s = (double)(end->tv_sec - start->tv_sec);
+    double ns = (double)(end->tv_nsec - start->tv_nsec) / 1e9;
+    return s + ns;
+}
+
 static int run_single_command(char *cmd) {
     char *argv[MAX_ARGS];
 
@@ -111,6 +118,12 @@ static int run_single_command(char *cmd) {
         return 1;
     }
 
+    struct timespec t_start, t_end;
+    if (clock_gettime(CLOCK_MONOTONIC, &t_start) != 0) {
+        perror("clock_gettime");
+        // не выходим — просто не меряем время, но команда должна выполниться
+    }
+
     if (pid == 0) {
         execvp(argv[0], argv);
 
@@ -129,6 +142,17 @@ static int run_single_command(char *cmd) {
     if (waitpid(pid, &status, 0) < 0) {
         perror("waitpid");
         return 1;
+    }
+
+    write(STDERR_FILENO, "DEBUG: after waitpid\n", 21);
+
+    if (clock_gettime(CLOCK_MONOTONIC, &t_end) == 0) {
+        double elapsed = diff_seconds(&t_start, &t_end);
+        char out[128];
+        int len = snprintf(out, sizeof(out), "Elapsed: %.6f s\n", elapsed);
+        if (len > 0) {
+            (void)write(STDERR_FILENO, out, (size_t)len);
+        }
     }
 
     if (WIFEXITED(status)) {
@@ -157,3 +181,5 @@ int main(void) {
 
     return 0;
 }
+
+
