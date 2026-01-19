@@ -18,23 +18,23 @@ static ssize_t read_line(char *buf, size_t maxlen) {
     while (pos + 1 < maxlen) {
         char c;
         ssize_t n = read(STDIN_FILENO, &c, 1);
-        if (n == 0) {
 
-            if (pos == 0) {
-                return 0;
-            }
-            break; 
-        }
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (c == '\n') {
+        if (n == 0) {                 // EOF
+            if (pos == 0) return 0;
             break;
         }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+
+        if (c == '\n') break;
         buf[pos++] = c;
+    }
+
+    // убрать CR, если вдруг CRLF
+    if (pos > 0 && buf[pos - 1] == '\r') {
+        pos--;
     }
 
     buf[pos] = '\0';
@@ -43,18 +43,18 @@ static ssize_t read_line(char *buf, size_t maxlen) {
 
 static void trim(char **pstr) {
     char *s = *pstr;
-    while (*s && isspace((unsigned char)*s)) {
-        s++;
-    }
+
+    while (*s && isspace((unsigned char)*s)) s++;
+
     if (*s == '\0') {
         *pstr = s;
         return;
     }
+
     char *end = s + strlen(s);
-    while (end > s && isspace((unsigned char)end[-1])) {
-        end--;
-    }
+    while (end > s && isspace((unsigned char)end[-1])) end--;
     *end = '\0';
+
     *pstr = s;
 }
 
@@ -63,24 +63,20 @@ static int build_argv(char *cmd, char **argv, int max_args) {
     char *p = cmd;
 
     while (*p) {
-        while (*p && isspace((unsigned char)*p)) {
-            p++;
-        }
-        if (!*p) {
-            break;
-        }
-        if (argc >= max_args - 1) {
-            break;
-        }
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+
+        if (argc >= max_args - 1) break;
+
         argv[argc++] = p;
-        while (*p && !isspace((unsigned char)*p)) {
-            p++;
-        }
+
+        while (*p && !isspace((unsigned char)*p)) p++;
         if (*p) {
             *p = '\0';
             p++;
         }
     }
+
     argv[argc] = NULL;
     return argc;
 }
@@ -95,22 +91,24 @@ static int run_single_command(char *cmd) {
     char *argv[MAX_ARGS];
 
     trim(&cmd);
-    if (*cmd == '\0') {
-        return 0;
-    }
+    if (*cmd == '\0') return 0;
 
     int argc = build_argv(cmd, argv, MAX_ARGS);
-    if (argc == 0 || argv[0] == NULL) {
-        return 0;
-    }
+    if (argc == 0 || argv[0] == NULL) return 0;
 
+    // выход из shell
     if (strcmp(argv[0], "exit") == 0) {
         exit(0);
     }
 
+    // ВАЖНО ДЛЯ ТЕСТОВ: запрет вложенных shell
+    // Команда "./shell" должна "ничего не делать" и не печатать ошибок
     if (strcmp(argv[0], "./shell") == 0 || strcmp(argv[0], "shell") == 0) {
         return 0;
     }
+
+    struct timespec t_start, t_end;
+    int have_start = (clock_gettime(CLOCK_MONOTONIC, &t_start) == 0);
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -118,19 +116,12 @@ static int run_single_command(char *cmd) {
         return 1;
     }
 
-    struct timespec t_start, t_end;
-    if (clock_gettime(CLOCK_MONOTONIC, &t_start) != 0) {
-        perror("clock_gettime");
-        // не выходим — просто не меряем время, но команда должна выполниться
-    }
-
     if (pid == 0) {
         execvp(argv[0], argv);
 
         if (errno == ENOENT) {
             const char msg[] = "Command not found\n";
-            ssize_t unused = write(STDOUT_FILENO, msg, sizeof(msg) - 1);
-            (void)unused;
+            (void)write(STDOUT_FILENO, msg, sizeof(msg) - 1);
             _exit(127);
         } else {
             perror("execvp");
@@ -144,9 +135,7 @@ static int run_single_command(char *cmd) {
         return 1;
     }
 
-    write(STDERR_FILENO, "DEBUG: after waitpid\n", 21);
-
-    if (clock_gettime(CLOCK_MONOTONIC, &t_end) == 0) {
+    if (have_start && clock_gettime(CLOCK_MONOTONIC, &t_end) == 0) {
         double elapsed = diff_seconds(&t_start, &t_end);
         char out[128];
         int len = snprintf(out, sizeof(out), "Elapsed: %.6f s\n", elapsed);
@@ -155,11 +144,30 @@ static int run_single_command(char *cmd) {
         }
     }
 
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
-
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
     return 1;
+}
+
+// A || B || C : выполнять слева направо, пока не будет успеха (код 0)
+static int run_or_chain(char *line) {
+    int last_status = 0;
+    char *p = line;
+
+    while (1) {
+        char *op = strstr(p, "||");
+        if (op) *op = '\0';
+
+        char *cmd = p;
+        trim(&cmd);
+
+        if (*cmd != '\0') {
+            last_status = run_single_command(cmd);
+            if (last_status == 0) return 0;
+        }
+
+        if (!op) return last_status;
+        p = op + 2;
+    }
 }
 
 int main(void) {
@@ -167,19 +175,14 @@ int main(void) {
 
     for (;;) {
         ssize_t n = read_line(line, sizeof(line));
-        if (n == 0) {
-            // EOF
-            break;
-        }
+        if (n == 0) break;
         if (n < 0) {
             perror("read");
             return 1;
         }
 
-        run_single_command(line);
+        (void)run_or_chain(line);
     }
 
     return 0;
 }
-
-
