@@ -11,7 +11,7 @@ all: $(addprefix $(BINDIR)/,$(PROGS))
 $(BINDIR)/proc-fork: $(SRCDIR)/proc-fork.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(BINDIR)/shell_or: $(SRCDIR)/shell_or.c
+$(BINDIR)/shell_or: $(SRCDIR)/mysh.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(BINDIR)/cpu-calc-md5: $(SRCDIR)/cpu-calc-md5.c
